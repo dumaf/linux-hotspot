@@ -274,9 +274,9 @@ channel=36
 
 ## License
 
-This project is provided as-is for educational purposes. You are free to modify and use it according to your needs.
+This project is provided as-is for educational purposes meaning that you can abuse this in college wifi how much ever you want. You are free to modify and use it according to your needs.
 
 ## Acknowledgements
 
 - Based on standard Linux wireless tools: hostapd, dnsmasq, iw
-- Inspired by various DIY hotspot tutorials and scripts
+- Inspired by various me being bored moments and getting annoyed by no mobile network on my college premises so that I can scroll.
