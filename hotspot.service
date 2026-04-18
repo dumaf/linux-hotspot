@@ -1,0 +1,15 @@
+[Unit]
+Description=Linux Hotspot Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+ExecStart=%h/linux hotspot/hotspot.sh
+ExecStop=%h/linux hotspot/hotspot.sh stop
+RemainAfterExit=yes
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
