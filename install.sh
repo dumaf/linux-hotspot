@@ -1,220 +1,104 @@
-#!/bin/bash
-# Linux Hotspot Installation Script
-# Detects WiFi driver, installs dependencies, and sets up the systemd service
+#!/usr/bin/env bash
+# Install dependencies and systemd wiring for linux-hotspot.
 
-set -e
+set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SERVICE_NAME="hotspot.service"
 SYSTEMD_DIR="/etc/systemd/system"
-CONFIG_DIR="/etc/dnsmasq.d"
-HOSTAPD_DIR="/etc/hostapd"
+SERVICE_NAME="hotspot.service"
+SCRIPT_TARGET="/usr/local/bin/linux-hotspot"
 
-DETECTED_DRIVER=""
+log() {
+    printf '[install] %s\n' "$*"
+}
 
-echo "========================================="
-echo "Linux Hotspot Installation Script"
-echo "========================================="
-
-# Check if running as root
-if [[ $EUID -ne 0 ]]; then
-    echo "Error: This script must be run as root"
+die() {
+    printf '[install] ERROR: %s\n' "$*" >&2
     exit 1
-fi
-
-# Function to detect WiFi driver
-detect_wifi_driver() {
-    echo ""
-    echo "Detecting WiFi adapter and driver..."
-
-    local wifi_device=""
-    local driver=""
-
-    # Try to find a WiFi device
-    for dev in /sys/class/net/*; do
-        local iface=$(basename "$dev")
-        if [[ -d "/sys/class/net/$iface/wireless" ]]; then
-            wifi_device="$iface"
-            break
-        fi
-    done
-
-    if [[ -z "$wifi_device" ]]; then
-        # Try using ip link
-        wifi_device=$(ip link show | grep -E '^[0-9]+: .*: wl' | head -1 | cut -d: -f2 | tr -d ' ')
-    fi
-
-    if [[ -z "$wifi_device" ]]; then
-        echo "Warning: No WiFi interface detected!"
-        return 1
-    fi
-
-    echo "Found WiFi interface: $wifi_device"
-
-    # Get driver using ethtool or lspci
-    if command -v ethtool &>/dev/null; then
-        driver=$(ethtool -i "$wifi_device" 2>/dev/null | grep "driver:" | awk '{print $2}')
-    fi
-
-    if [[ -z "$driver" ]]; then
-        # Try lspci
-        driver=$(lspci -k 2>/dev/null | grep -A3 "$wifi_device" | grep "driver:" | awk '{print $2}')
-    fi
-
-    if [[ -z "$driver" ]]; then
-        # Try reading from sysfs
-        driver=$(readlink -f "/sys/class/net/$wifi_device/device/driver" 2>/dev/null | xargs basename)
-    fi
-
-    if [[ -n "$driver" ]]; then
-        echo "Driver detected: $driver"
-        DETECTED_DRIVER="$driver"
-
-        # Check if driver supports AP mode
-        if iw list 2>/dev/null | grep -A10 "Supported interface modes" | grep -q "AP"; then
-            echo "Driver supports AP mode - Good!"
-            return 0
-        else
-            echo "Warning: Driver may not support AP mode"
-            echo "You may need to use a different driver or USB adapter"
-            return 1
-        fi
-    else
-        echo "Warning: Could not detect driver"
-        return 1
-    fi
 }
 
-# Function to install required packages
+require_root() {
+    if [[ $EUID -eq 0 ]]; then
+        return 0
+    fi
+    if command -v sudo >/dev/null 2>&1; then
+        exec sudo -E bash "$0" "$@"
+    fi
+    die "Run this installer as root."
+}
+
+detect_pm() {
+    if command -v apt-get >/dev/null 2>&1; then
+        echo "apt"
+        return
+    fi
+    if command -v dnf >/dev/null 2>&1; then
+        echo "dnf"
+        return
+    fi
+    if command -v pacman >/dev/null 2>&1; then
+        echo "pacman"
+        return
+    fi
+    if command -v zypper >/dev/null 2>&1; then
+        echo "zypper"
+        return
+    fi
+    echo ""
+}
+
 install_packages() {
-    echo ""
-    echo "Installing required packages..."
-
-    local packages=("hostapd" "dnsmasq" "iw" "iptables" "ip" "sed" "grep" "awk" "coreutils")
-
-    # Check for optional packages
-    if ! command -v lspci &>/dev/null; then
-        packages+=("pciutils")
-    fi
-    if ! command -v ethtool &>/dev/null; then
-        packages+=("ethtool")
+    local pm
+    pm="$(detect_pm)"
+    if [[ -z "$pm" ]]; then
+        die "Unsupported distro package manager. Install hostapd dnsmasq iw iproute2 iptables manually."
     fi
 
-    local missing=()
-
-    for pkg in "${packages[@]}"; do
-        if ! dpkg -l "$pkg" 2>/dev/null | grep -q "^ii"; then
-            missing+=("$pkg")
-        fi
-    done
-
-    if [[ ${#missing[@]} -gt 0 ]]; then
-        echo "Installing: ${missing[*]}"
-        apt-get update
-        apt-get install -y "${missing[@]}"
-    else
-        echo "All required packages already installed"
-    fi
+    log "Installing dependencies via $pm..."
+    case "$pm" in
+        apt)
+            apt-get update
+            apt-get install -y hostapd dnsmasq iw iproute2 iptables procps
+            ;;
+        dnf)
+            dnf install -y hostapd dnsmasq iw iproute iptables procps-ng
+            ;;
+        pacman)
+            pacman -Sy --noconfirm hostapd dnsmasq iw iproute2 iptables procps-ng
+            ;;
+        zypper)
+            zypper --non-interactive install hostapd dnsmasq iw iproute2 iptables procps
+            ;;
+        *)
+            die "Unsupported package manager: $pm"
+            ;;
+    esac
 }
 
-# Function to update hostapd.conf with detected driver
-update_hostapd_driver() {
-    if [[ -n "$DETECTED_DRIVER" ]]; then
-        echo ""
-        echo "Updating hostapd.conf with driver: $DETECTED_DRIVER"
-        sed -i "s/^driver=.*/driver=$DETECTED_DRIVER/" "$SCRIPT_DIR/hostapd.conf"
-        echo "Updated driver in $SCRIPT_DIR/hostapd.conf"
-    else
-        echo "No driver detected, keeping default in hostapd.conf"
-    fi
+install_script() {
+    log "Installing hotspot runner to $SCRIPT_TARGET"
+    install -m 0755 "$SCRIPT_DIR/hotspot.sh" "$SCRIPT_TARGET"
 }
 
-# Function to copy configuration files
-copy_config_files() {
-    echo ""
-    echo "Copying configuration files..."
-
-    # Create directories if they don't exist
-    mkdir -p "$CONFIG_DIR"
-    mkdir -p "$HOSTAPD_DIR"
-
-    # Copy dnsmasq config
-    if [[ -f "$SCRIPT_DIR/dnsmasq.conf" ]]; then
-        cp "$SCRIPT_DIR/dnsmasq.conf" "$CONFIG_DIR/hotspot.conf"
-        echo "Copied dnsmasq.conf -> $CONFIG_DIR/hotspot.conf"
-    else
-        echo "Warning: dnsmasq.conf not found in $SCRIPT_DIR"
-    fi
-
-    # Copy hostapd config
-    if [[ -f "$SCRIPT_DIR/hostapd.conf" ]]; then
-        cp "$SCRIPT_DIR/hostapd.conf" "$HOSTAPD_DIR/hostapd.conf"
-        echo "Copied hostapd.conf -> $HOSTAPD_DIR/hostapd.conf"
-    else
-        echo "Warning: hostapd.conf not found in $SCRIPT_DIR"
-    fi
-}
-
-# Function to install systemd service
-install_systemd_service() {
-    echo ""
-    echo "Installing systemd service..."
-
-    # Check if the service file exists
-    if [[ ! -f "$SCRIPT_DIR/$SERVICE_NAME" ]]; then
-        echo "Error: $SERVICE_NAME not found in $SCRIPT_DIR"
-        exit 1
-    fi
-
-    # Copy to systemd directory
-    cp "$SCRIPT_DIR/$SERVICE_NAME" "$SYSTEMD_DIR/$SERVICE_NAME"
-    echo "Copied $SERVICE_NAME -> $SYSTEMD_DIR/$SERVICE_NAME"
-
-    # Update the service file with actual script path
-    sed -i "s|%h/linux hotspot/hotspot.sh|$SCRIPT_DIR/hotspot.sh|g" "$SYSTEMD_DIR/$SERVICE_NAME"
-
-    # Reload systemd
+install_service() {
+    log "Installing systemd service..."
+    install -m 0644 "$SCRIPT_DIR/$SERVICE_NAME" "$SYSTEMD_DIR/$SERVICE_NAME"
     systemctl daemon-reload
-    echo "Reloaded systemd daemon"
-
-    # Enable the service
     systemctl enable "$SERVICE_NAME"
-    echo "Enabled $SERVICE_NAME"
 }
 
-# Main execution
 main() {
-    # Detect WiFi driver
-    detect_wifi_driver || echo "Proceeding anyway..."
-
-    # Update hostapd.conf with detected driver
-    update_hostapd_driver
-
-    # Install packages
+    require_root "$@"
     install_packages
+    install_script
+    install_service
 
-    # Copy config files
-    copy_config_files
-
-    # Install systemd service
-    install_systemd_service
-
-    echo ""
-    echo "========================================="
-    echo "Installation complete!"
-    echo "========================================="
-    echo ""
-    echo "To start the hotspot service:"
-    echo "  sudo systemctl start hotspot"
-    echo ""
-    echo "To stop the hotspot service:"
-    echo "  sudo systemctl stop hotspot"
-    echo ""
-    echo "To check status:"
-    echo "  sudo systemctl status hotspot"
-    echo ""
-    echo "To enable on boot:"
-    echo "  sudo systemctl enable hotspot"
+    echo
+    echo "Installation complete."
+    echo "Start hotspot now:   sudo systemctl start hotspot"
+    echo "Check status:        sudo systemctl status hotspot"
+    echo "Stop hotspot:        sudo systemctl stop hotspot"
+    echo "Run manually:        sudo /usr/local/bin/linux-hotspot run"
 }
 
 main "$@"
