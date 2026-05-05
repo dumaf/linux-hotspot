@@ -72,7 +72,7 @@ Compared to the original scripts:
 - fixed `hostapd` key field (`wpa_passphrase`, not `passphrase`)
 - fixed invalid `ip addr add` usage with dotted netmask
 - separated AP radio interface from NAT uplink interface logic
-- replaced broad `pkill` cleanup with PID/state-based cleanup
+- replaced broad `pkill` cleanup with PID/state-based cleanup(I can kill anything ahh behaviour)
 - avoided mutating global config files on each run
 
 ## Notes
@@ -80,3 +80,4 @@ Compared to the original scripts:
 - Hardware/driver must support AP mode (`iw phy ...` with `* AP`).
 - Some adapters cannot do AP + client mode simultaneously on one radio.
 - Script currently uses `iptables` for NAT.
+- I am so tired please let this one work for christs sake 
