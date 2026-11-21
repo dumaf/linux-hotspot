@@ -7,7 +7,8 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONF_FILE="${SCRIPT_DIR}/hotspot.conf"
 STATE_DIR="/run/linux-hotspot"
-PACKET_ENGI NE="${SCRIPT_DIR}/packet_engine"
+PACKET_ENGINE="${SCRIPT_DIR}/packet_engine"
+DETECT_SCRIPT="${SCRIPT_DIR}/detect_wifi.sh"
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
 SSID="LinuxHotspot"
@@ -25,6 +26,9 @@ GW_IP=""
 SUBNET_PREFIX=""
 STA_CHANNEL=""
 STA_FREQ=""
+WIFI_PHY=""
+WIFI_DRIVER=""
+WIFI_MODEL=""
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 log()  { printf '\033[1;32m[hotspot]\033[0m %s\n' "$*"; }
@@ -37,8 +41,8 @@ require_root() {
 
 load_conf() {
     if [[ -f "$CONF_FILE" ]]; then
-        # shellcheck disable=SC1090
-        source "$CONF_FILE"
+        # Strip Windows carriage returns (\r) in case the file was edited on Windows
+        eval "$(tr -d '\r' < "$CONF_FILE")"
         log "Loaded configuration from $CONF_FILE"
     else
         warn "No config file found at $CONF_FILE, using defaults."
@@ -115,6 +119,27 @@ check_ap_support() {
         die "Wi-Fi hardware ($phy) does not support AP mode."
     fi
     log "Wi-Fi hardware ($phy) supports AP mode."
+}
+
+detect_wifi_hardware() {
+    if [[ -f "$DETECT_SCRIPT" ]]; then
+        log "Running Wi-Fi card identification ($DETECT_SCRIPT)..."
+        # Run report to output formatted card diagnostics
+        bash "$DETECT_SCRIPT" ${WIFI_IFACE:+--iface "$WIFI_IFACE"} || die "Wi-Fi identification failed."
+        # Export detected parameters into current session
+        local export_vars
+        export_vars="$(bash "$DETECT_SCRIPT" --export ${WIFI_IFACE:+--iface "$WIFI_IFACE"})" || die "Failed to query Wi-Fi parameters."
+        eval "$export_vars"
+
+        if [[ "${AP_SUPPORTED:-0}" -ne 1 ]]; then
+            die "Selected Wi-Fi card '$WIFI_IFACE' does not support AP mode."
+        fi
+        log "Wi-Fi card ready: $WIFI_IFACE (${WIFI_MODEL:-unknown}, driver: ${WIFI_DRIVER:-unknown})"
+    else
+        detect_wifi_iface
+        detect_sta_channel
+        check_ap_support
+    fi
 }
 
 # ── Hotspot Lifecycle ─────────────────────────────────────────────────────────
@@ -250,6 +275,7 @@ save_state() {
     cat > "${STATE_DIR}/state.env" <<EOF
 AP_IFACE=$AP_IFACE
 WIFI_IFACE=$WIFI_IFACE
+WIFI_MODEL=$WIFI_MODEL
 GW_IP=$GW_IP
 SUBNET=$SUBNET
 SUBNET_PREFIX=$SUBNET_PREFIX
@@ -260,9 +286,7 @@ EOF
 do_start() {
     require_root
     load_conf
-    detect_wifi_iface
-    detect_sta_channel
-    check_ap_support
+    detect_wifi_hardware
     pick_ap_iface
 
     # Check dependencies
@@ -280,6 +304,7 @@ do_start() {
     echo ""
     log "════════════════════════════════════════════════"
     log "  Hotspot is ACTIVE"
+    log "  Wi-Fi Card: ${WIFI_IFACE} ${WIFI_MODEL:+($WIFI_MODEL)}"
     log "  SSID:       $SSID"
     log "  Password:   $PASSWORD"
     log "  Gateway:    $GW_IP"
@@ -371,8 +396,8 @@ do_status() {
 
     echo ""
     log "Hotspot Status:"
+    log "  Wi-Fi Card:    ${WIFI_IFACE:-unknown} ${WIFI_MODEL:+($WIFI_MODEL)}"
     log "  AP Interface:  ${AP_IFACE:-unknown}"
-    log "  Wi-Fi Iface:   ${WIFI_IFACE:-unknown}"
     log "  Gateway:       ${GW_IP:-unknown}"
     log "  Subnet:        ${SUBNET:-unknown}"
 
@@ -395,6 +420,16 @@ do_status() {
     echo ""
 }
 
+# ── Detect ───────────────────────────────────────────────────────────────────
+do_detect() {
+    load_conf
+    if [[ -f "$DETECT_SCRIPT" ]]; then
+        bash "$DETECT_SCRIPT" ${WIFI_IFACE:+--iface "$WIFI_IFACE"}
+    else
+        die "Wi-Fi identification script not found at $DETECT_SCRIPT."
+    fi
+}
+
 # ── QR ────────────────────────────────────────────────────────────────────────
 do_qr() {
     load_conf
@@ -406,18 +441,20 @@ case "${1:-start}" in
     start)  do_start ;;
     stop)   do_stop  ;;
     status) do_status ;;
+    detect) do_detect ;;
     qr)     do_qr    ;;
     -h|--help)
-        echo "Usage: sudo $0 {start|stop|status|qr}"
+        echo "Usage: sudo $0 {start|stop|status|detect|qr}"
         echo ""
         echo "Commands:"
         echo "  start   Start the same-channel Wi-Fi hotspot"
         echo "  stop    Stop the hotspot and clean up"
         echo "  status  Show hotspot status and connected clients"
+        echo "  detect  Identify Wi-Fi card hardware, capabilities, and channel"
         echo "  qr      Display the Wi-Fi QR code"
         ;;
     *)
-        die "Unknown command: $1 (use: start|stop|status|qr)"
+        die "Unknown command: $1 (use: start|stop|status|detect|qr)"
         ;;
 esac
 
